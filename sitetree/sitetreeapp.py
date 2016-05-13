@@ -6,7 +6,7 @@ from collections import defaultdict
 from copy import copy, deepcopy
 from threading import local
 from functools import partial
-from urllib import unqoute
+from urllib import unquote
 
 from django.conf import settings
 from django import VERSION
@@ -523,7 +523,7 @@ class SiteTree(object):
                     'in your settings file. If it is, check that your view pushes request data into the template.')
         else:
             # urlquote is an attempt to support non-ascii in url.
-            current_url = unqoute(urlquote(self._global_context['request'].path))
+            current_url = unquote(urlquote(self._global_context['request'].path))
             urls_cache = self.cache.get_entry('urls', '%s%s' % (tree_alias, self.lang_get()))
             if urls_cache:
                 for url_item in urls_cache:
