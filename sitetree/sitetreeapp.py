@@ -27,6 +27,7 @@ from .utils import get_tree_model, get_tree_item_model, import_app_sitetree_modu
 from .settings import (
     ALIAS_TRUNK, ALIAS_THIS_CHILDREN, ALIAS_THIS_SIBLINGS, ALIAS_THIS_PARENT_SIBLINGS, ALIAS_THIS_ANCESTOR_CHILDREN,
     UNRESOLVED_ITEM_MARKER, RAISE_ITEMS_ERRORS_ON_DEBUG, CACHE_TIMEOUT)
+from .exceptions import SiteTreeError
 
 
 if VERSION >= (1, 9, 0):
@@ -54,6 +55,7 @@ _SITETREE = None
 
 _THREAD_LOCAL = local()
 _THREAD_LANG = 'sitetree_lang'
+_THREAD_CACHE = 'sitetree_cache'
 
 
 def get_sitetree():
@@ -293,10 +295,15 @@ class Cache(object):
         # Drop cache flag set by .reset() method.
         cache.get('sitetrees_reset') and self.empty()
 
-        cache_ = cache.get('sitetrees')
+        cache_ = getattr(_THREAD_LOCAL, _THREAD_CACHE, None)
         if cache_ is None:
-            # Init cache dictionary with predefined entries.
-            cache_ = {'sitetrees': {}, 'urls': {}, 'parents': {}, 'items_by_ids': {}, 'tree_aliases': {}}
+
+            cache_ = cache.get(
+                # Init cache dictionary with predefined entries.
+                'sitetrees', {'sitetrees': {}, 'urls': {}, 'parents': {}, 'items_by_ids': {}, 'tree_aliases': {}})
+
+            setattr(_THREAD_LOCAL, _THREAD_CACHE, cache_)
+
         self.cache = cache_
 
     def save(self):
@@ -306,6 +313,7 @@ class Cache(object):
     def empty(self, **kwargs):
         """Empties cached sitetree data."""
         self.cache = None
+        setattr(_THREAD_LOCAL, _THREAD_CACHE, None)
         cache.delete('sitetrees')
         cache.delete('sitetrees_reset')
 
@@ -411,9 +419,16 @@ class SiteTree(object):
 
     def current_app_is_admin(self):
         """Returns boolean whether current application is Admin contrib."""
-        current_app = (
-            getattr(self._global_context.get('request', None), 'current_app',
-                    self._global_context.current_app))
+        global_context = self._global_context
+
+        current_app = getattr(
+            # Try from request.resolver_match.app_name
+            getattr(global_context.get('request', None), 'resolver_match', None), 'app_name',
+            # Try from global context obj.
+            getattr(global_context, 'current_app', None))
+
+        if current_app is None:  # Try from global context dict.
+            current_app = global_context.get('current_app', '')
 
         return current_app == 'admin'
 
@@ -428,8 +443,6 @@ class SiteTree(object):
         get_cache_entry = cache.get_entry
         set_cache_entry = cache.set_entry
 
-        cache.init()
-
         sitetree_needs_caching = False
         if not self.current_app_is_admin():
             # We do not need i18n for a tree rendered in Admin dropdown.
@@ -438,6 +451,7 @@ class SiteTree(object):
 
         if not sitetree:
             sitetree = MODEL_TREE_ITEM_CLASS.objects.select_related('parent', 'tree').\
+                   prefetch_related('access_permissions__content_type').\
                    filter(tree__alias__exact=alias).order_by('parent__sort_order', 'sort_order')
             sitetree = self.attach_dynamic_tree_items(alias, sitetree)
             set_cache_entry('sitetrees', alias, sitetree)
@@ -469,7 +483,7 @@ class SiteTree(object):
                 if item.access_restricted:
                     permissions_src = (
                         item.permissions if getattr(item, 'is_dynamic', False)
-                        else item.access_permissions.select_related())
+                        else item.access_permissions.all())
 
                     item.perms = set(
                         ['%s.%s' % (perm.content_type.app_label, perm.codename) for perm in permissions_src])
@@ -639,11 +653,16 @@ class SiteTree(object):
         self.lang_init()
         # Resolve tree_alias from the context.
         tree_alias = self.resolve_var(tree_alias)
+
+        self.cache.init()  # Warm up cache.
+
         # Get tree.
         tree_alias, sitetree_items = self.get_sitetree(tree_alias)
+
         # No items in tree, fail silently.
         if not sitetree_items:
             return False, False
+
         return tree_alias, sitetree_items
 
     def get_current_page_title(self, tree_alias, context):
@@ -857,6 +876,7 @@ class SiteTree(object):
         if start_from.inbreadcrumbs and start_from.hidden == False and self.check_access(start_from,
                                                                                          self._global_context):
             self.cache_breadcrumbs.append(start_from)
+
         if hasattr(start_from, 'parent') and start_from.parent is not None:
             self.breadcrumbs_climber(tree_alias, self.get_item_by_id(tree_alias, start_from.parent.id))
 
@@ -880,7 +900,3 @@ class SiteTree(object):
                 varname = varname
 
         return varname
-
-
-class SiteTreeError(Exception):
-    """Exception class for sitetree application."""

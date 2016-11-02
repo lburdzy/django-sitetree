@@ -5,12 +5,13 @@ try:
     from StringIO import StringIO
 except ImportError:
     from io import StringIO
-    
+
 try:
     from unittest import mock
 except ImportError:
     import mock
 
+from django import VERSION
 from django.conf import settings
 from django.utils.translation import activate
 from django.template.base import Template, TemplateSyntaxError
@@ -21,26 +22,26 @@ from django.contrib.auth.models import Permission
 from django.contrib.admin.sites import site
 from django.core.management import call_command
 from django.core.exceptions import ImproperlyConfigured
-from django.conf.urls import patterns, url
+from django.conf.urls import url
 
 from sitetree.models import Tree, TreeItem
-from sitetree.forms import TreeItemForm
 from sitetree.admin import TreeAdmin, TreeItemAdmin, redirects_handler
-from sitetree.utils import (
-    tree, item, get_app_n_model, import_app_sitetree_module, import_project_sitetree_modules, get_model_class
-)
-from sitetree.sitetreeapp import (
-    SiteTree, SiteTreeError, register_items_hook, register_i18n_trees, register_dynamic_trees, compose_dynamic_tree,
-    get_dynamic_trees
-)
+from sitetree.utils import get_app_n_model, get_model_class
+from sitetree.sitetreeapp import SiteTree
+from sitetree.toolbox import TreeItemForm, tree, item, import_app_sitetree_module, import_project_sitetree_modules, \
+    register_items_hook, register_i18n_trees, register_dynamic_trees, compose_dynamic_tree, get_dynamic_trees
+from sitetree.exceptions import SiteTreeError
 
-
-urlpatterns = patterns(
-    '',
+urlpatterns = [
     url(r'articles/', lambda r: None, name='articles_list'),
     url(r'articles/(\d+)/', lambda r: None, name='articles_detailed'),
     url(r'articles/(?P<id>\d+)_(?P<slug>[\w-]+)/', lambda r: None, name='url'),
-)
+]
+
+if VERSION < (1, 10):
+    from django.conf.urls import patterns
+    urlpatterns.insert(0, '')
+    urlpatterns = patterns(*urlpatterns)
 
 
 class MockRequest(object):
@@ -70,17 +71,26 @@ class MockUser(object):
         return self.permissions
 
 
-def get_mock_context(app=None, path=None, user_authorized=False, tree_item=None, put_var=None):
+def get_mock_context(app='', path=None, user_authorized=False, tree_item=None, put_var=None):
+
     ctx = Context(
         {
             'request': MockRequest(path, user_authorized),
             't2_root2_title': 'my_real_title', 'art_id': 10, 'tree_item': tree_item,
             'somevar_str': 'articles_list', 'somevar_list': ['a', 'b'], 'put_var': put_var
-        },
-        current_app=app
+        }
     )
     ctx.template = mock.MagicMock()
     ctx.template.engine.string_if_invalid = ''
+
+    if VERSION >= (1, 10):
+        match = mock.MagicMock()
+        match.app_name = app
+        ctx.resolver_match = match
+
+    else:
+        ctx._current_app = app
+
     return ctx
 
 
@@ -287,6 +297,19 @@ class TreeItemModelTest(SitetreeTest):
         self.assertEqual(ti1.title, 'not_new_root_item')
         ti1.delete()
         self.assertIsNone(ti1.id)
+
+    def test_no_recursive_parents(self):
+        """Verify that treeitems cannot be their own parent."""
+        tree = Tree(alias="mytree")
+        tree.save()
+        tree_item = TreeItem(title="i'm my own grandpa", tree=tree)
+        # This item needs to be saved, otherwise it cannot be set
+        # as a parent.
+        tree_item.save()
+
+        tree_item.parent = tree_item
+        tree_item.save()
+        self.assertNotEqual(tree_item, tree_item.parent)
 
     def test_context_proc_required(self):
         context = Context()
@@ -590,7 +613,9 @@ class TreeTest(SitetreeTest):
         self.assertEqual(self.t3_en.get_title(), 'tree3en_title')
 
     def test_children_filtering(self):
-        self.sitetree._global_context = get_mock_context(path='/')
+        self.sitetree.cache.init()
+
+        self.sitetree.set_global_context(get_mock_context(path='/'))
         self.sitetree.get_sitetree('tree3')
         children = self.sitetree.get_children('tree3', self.t3_root)
         filtered = self.sitetree.filter_items(children, 'menu')
@@ -602,7 +627,7 @@ class TreeTest(SitetreeTest):
 
     def test_register_i18n_trees(self):
         register_i18n_trees(['tree3'])
-        self.sitetree._global_context = get_mock_context(path='/the_same_url/')
+        self.sitetree.set_global_context(get_mock_context(path='/the_same_url/'))
 
         activate('en')
         self.sitetree.get_sitetree('tree3')
@@ -624,6 +649,8 @@ class TreeTest(SitetreeTest):
 class DynamicTreeTest(SitetreeTest):
 
     def test_basic_old_and_new(self):
+
+        self.sitetree.cache.init()
 
         # Assert no dynamic attached.
         tree_alias, sitetree_items = self.sitetree.get_sitetree('main')
@@ -683,7 +710,8 @@ class DynamicTreeTest(SitetreeTest):
             register_dynamic_trees(trees, **kwargs)
 
         mock_context = get_mock_context(path='/the_same_url/')
-        self.sitetree._global_context = mock_context
+        self.sitetree.cache.init()
+        self.sitetree.set_global_context(mock_context)
         tree_alias, sitetree_items = self.sitetree.get_sitetree('main')
 
         if reset_cache:

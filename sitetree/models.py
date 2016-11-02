@@ -125,11 +125,22 @@ class TreeItemBase(models.Model):
         help_text=_('Item position among other site tree items under the same parent.'), db_index=True, default=0)
 
     def save(self, force_insert=False, force_update=False, **kwargs):
-        """We override parent save method to set item's sort order to its' primary
-        key value.
+        """Ensure that item is not its own parent and set proper sort order.
 
         """
+        # Ensure that item is not its own parent, since this breaks
+        # the sitetree (and possibly the entire site).
+        if self.parent == self:
+            self.parent = None
+        
+        # Set item's sort order to its primary key.
+        id_ = self.id
+        if id_ and self.sort_order == 0:
+            self.sort_order = id_
+        
         super(TreeItemBase, self).save(force_insert, force_update, **kwargs)
+
+        # Set item's sort order to its primary key if not already set.
         if self.sort_order == 0:
             self.sort_order = self.id
             self.save()
